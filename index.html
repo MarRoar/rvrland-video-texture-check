@@ -32,12 +32,18 @@
       video, canvas { display: block; width: 100%; aspect-ratio: 3 / 4; border: 1px solid #57544d; border-radius: 7px; background: #000; object-fit: contain; }
       pre { max-height: 220px; overflow: auto; margin: 10px 0 0; padding: 9px; border-radius: 7px; background: #111315; color: #bfc5c3; font: 11px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
       .note { font-size: 13px; }
+      .case, .summary { scroll-margin-top: 76px; }
+      .summary pre + pre { margin-top: 12px; }
+      input { max-width: 100%; }
+      canvas.chroma { background: repeating-conic-gradient(#555 0% 25%, #333 0% 50%) 0/16px 16px; }
     </style>
   </head>
   <body>
     <main>
-      <h1>小米视频纹理诊断</h1>
-      <p class="note">请在出现人物黑块的同一台手机和浏览器中点击“开始检测”，等待约 8 秒，再复制结果。</p>
+      <h1>小米视频纹理诊断 · V2</h1>
+      <p class="note">版本 2026-09-18.2。请保持页面前台，点击开始后等待约 35–70 秒。页面会自动滚动到当前测试，请勿切换应用。完成后截取设备信息和各组结果，无需复制。</p>
+      <p class="note">默认素材仍是游客视频，不代表已测试所有 NPC。可选：选择一段实际出问题的 NPC 视频，增加页面内／离屏对照；文件只在本机读取，不会上传。</p>
+      <input id="source" type="file" accept="video/*" aria-label="可选的 NPC 视频" />
       <div class="actions">
         <button id="start" type="button">开始检测</button>
         <button id="copy" type="button" disabled>复制诊断结果</button>
@@ -46,6 +52,6 @@
       <section id="device" class="device">正在读取设备信息…</section>
       <div id="cases"></div>
     </main>
-    <script src="./diagnostics.js"></script>
+    <script src="./diagnostics.js?v=20260918-2"></script>
   </body>
 </html>

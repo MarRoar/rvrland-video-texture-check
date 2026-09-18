@@ -3,7 +3,7 @@ const TESTS = [
   { id: "main", label: "兼容 H.264 Main", url: "./idle-main.mp4", codec: 'video/mp4; codecs="avc1.4d4020"' }
 ];
 
-const report = { createdAt: new Date().toISOString(), environment: {}, cases: [] };
+const report = { version: "2026-09-18.2", createdAt: new Date().toISOString(), environment: {}, cases: [] };
 const device = document.querySelector("#device");
 const casesHost = document.querySelector("#cases");
 const startButton = document.querySelector("#start");
@@ -19,7 +19,7 @@ function glInfo() {
   const gl = createGl(canvas);
   if (!gl) return { available: false };
   const debug = gl.getExtension("WEBGL_debug_renderer_info");
-  return {
+  const info = {
     available: true,
     version: gl.getParameter(gl.VERSION),
     shadingLanguage: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
@@ -27,6 +27,8 @@ function glInfo() {
     renderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
     maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE)
   };
+  gl.getExtension("WEBGL_lose_context")?.loseContext();
+  return info;
 }
 
 async function mediaCapabilities() {
@@ -53,6 +55,7 @@ async function collectEnvironment() {
     viewport: `${innerWidth}x${innerHeight}`,
     devicePixelRatio,
     hardwareConcurrency: navigator.hardwareConcurrency,
+    frameCallbackSupported: "requestVideoFrameCallback" in HTMLVideoElement.prototype,
     webgl: glInfo(),
     canPlay: Object.fromEntries(TESTS.map(test => [test.id, document.createElement("video").canPlayType(test.codec)])),
     mediaCapabilities: await mediaCapabilities()
@@ -72,9 +75,21 @@ function makeCase(test) {
       <figure><figcaption>4. 当前抠绿 Shader</figcaption><canvas class="chroma" width="180" height="240"></canvas></figure>
     </div>
     <pre>尚未开始</pre>`;
-  const video = section.querySelector("video");
+  const preview = section.querySelector("video");
+  // A newly created detached element avoids the browser's pending removal task
+  // aborting play(), which would confound the intended business-style test.
+  const video = test.detached ? document.createElement("video") : preview;
+  video.muted = true;
+  video.playsInline = true;
+  video.loop = true;
+  video.preload = "auto";
+  video.controls = !!test.controls;
   video.crossOrigin = "anonymous";
-  video.src = test.url;
+  if (test.detached) {
+    const placeholder = document.createElement("p");
+    placeholder.textContent = "离屏视频：不插入页面，模拟业务创建方式。请看右侧及下方读取结果。";
+    preview.replaceWith(placeholder);
+  }
   casesHost.append(section);
   return { section, video, status: section.querySelector(".status"), log: section.querySelector("pre") };
 }
@@ -115,6 +130,14 @@ function createRenderer(canvas, chroma) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   return {
     gl,
+    dispose() {
+      gl.deleteTexture(texture);
+      gl.deleteBuffer(buffer);
+      gl.deleteProgram(program);
+      gl.deleteShader(vertex);
+      gl.deleteShader(fragment);
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
+    },
     draw(video) {
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
@@ -144,96 +167,267 @@ function pixelStats(canvas, gl) {
   return { blackPercent: +(black / count * 100).toFixed(1), transparentPercent: +(transparent / count * 100).toFixed(1) };
 }
 
+function classification(stat) {
+  if (!stat) return "未取到帧";
+  if (stat.transparentPercent > 95) return "全透明";
+  if (stat.blackPercent > 95) return "黑屏";
+  return "有图像";
+}
+
+function aggregate(samples, key) {
+  const counts = {};
+  for (const sample of samples) {
+    const state = classification(sample[key]);
+    counts[state] = (counts[state] || 0) + 1;
+  }
+  return samples.length ? Object.entries(counts).map(([state, count]) => state + count + "次").join(" / ") : "未取到帧";
+}
+
 function renderSummary() {
-  const shortUa = report.environment.userAgent || "未知";
-  const lines = [
-    `浏览器: ${shortUa}`,
-    `GPU: ${report.environment.webgl?.renderer || "未知"}`,
-    "",
-    ...report.cases.map(item => {
-      const video = item.video?.currentTime > 0 ? "播放" : "失败";
-      const canvas = item.canvas2d?.blackPercent > 95 ? "黑屏" : item.canvas2d ? "正常" : "失败";
-      const webgl = item.webgl?.blackPercent > 95 ? "黑屏" : item.webgl ? "正常" : "失败";
-      const shader = item.chroma?.blackPercent > 95 ? "黑屏" : item.chroma ? "正常" : "失败";
-      return `${item.id.toUpperCase()}: VIDEO=${video}  CANVAS=${canvas}\n       WEBGL=${webgl}  SHADER=${shader}\n       GL=${item.webgl?.glError ?? "-"}/${item.chroma?.glError ?? "-"}`;
-    })
-  ];
-  summary.querySelector("pre").textContent = lines.join("\n");
+  summary.replaceChildren();
+  const title = document.createElement("h2");
+  title.textContent = "V2 检测结果（可分段截图）";
+  summary.append(title);
+  const env = document.createElement("pre");
+  env.textContent = "版本: " + report.version + "\n浏览器: " + report.environment.userAgent +
+    "\nGPU: " + report.environment.webgl?.renderer +
+    "\n帧回调支持: " + report.environment.frameCallbackSupported +
+    "\n离开前台: " + report.hiddenCount + "次";
+  summary.append(env);
+  for (const item of report.cases) {
+    const block = document.createElement("pre");
+    block.textContent = item.label + "\n" +
+      (item.kind === "static" ? "对照图: 红/绿/蓝/白四色\n" :
+        "时间变化: " + (item.timeAdvanced ? "有" : "无") +
+        "  帧回调: " + item.frameCallbacks + "\n") +
+      "Canvas: " + aggregate(item.samples, "canvas2d") + "\n" +
+      "WebGL: " + aggregate(item.samples, "webgl") + "\n" +
+      "抠绿: " + aggregate(item.samples, "chroma") + "\n" +
+      "GL错误: " + (item.glErrors.join(",") || "无") + "\n" +
+      "读取异常: " + (item.errors.join("；") || "无") +
+      (item.failure ? "\n未完成: " + item.failure : "") +
+      (item.readWhileHidden ? "\n注意: 存在后台采样，本组需前台重测" : "");
+    summary.append(block);
+  }
   summary.classList.add("visible");
-  summary.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function withTimeout(promise, milliseconds, message) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), milliseconds);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function addUnique(list, value) {
+  if (value && !list.includes(value)) list.push(value);
+}
+
+function makeControlImage() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 180;
+  canvas.height = 240;
+  const ctx = canvas.getContext("2d");
+  ["#ff0000", "#00ff00", "#0000ff", "#ffffff"].forEach((color, index) => {
+    ctx.fillStyle = color;
+    ctx.fillRect(index % 2 * 90, Math.floor(index / 2) * 120, 90, 120);
+  });
+  // Decode an actual image before uploading, independently of the video decoder.
+  const image = new Image();
+  image.src = canvas.toDataURL("image/png");
+  return image;
 }
 
 async function runCase(test) {
   const ui = makeCase(test);
-  const events = [];
-  for (const name of ["loadstart", "loadedmetadata", "loadeddata", "canplay", "playing", "waiting", "stalled", "error"]) {
-    ui.video.addEventListener(name, () => events.push({ name, at: performance.now().toFixed(0), readyState: ui.video.readyState }));
-  }
+  const result = {
+    id: test.id, label: test.label, kind: test.kind || "video",
+    source: test.local ? "用户选择的本机视频" : test.url,
+    mode: test.detached ? "detached" : "inline",
+    samples: [], events: [], errors: [], glErrors: [],
+    frameCallbacks: 0, frameMetadata: null, timeAdvanced: false, readWhileHidden: false
+  };
+  let plain;
+  let chroma;
+  let callbackId;
+  let stopped = false;
+  const listeners = [];
   const canvas2d = ui.section.querySelector(".canvas2d");
   const plainCanvas = ui.section.querySelector(".webgl");
   const chromaCanvas = ui.section.querySelector(".chroma");
-  let plain;
-  let chroma;
-  const result = { id: test.id, label: test.label, source: test.url, events };
+  const context2d = canvas2d.getContext("2d", { willReadFrequently: true });
+  const addEvent = (target, name, callback) => {
+    target.addEventListener(name, callback);
+    listeners.push(() => target.removeEventListener(name, callback));
+  };
+  const collectFrame = (_, metadata) => {
+    if (stopped) return;
+    result.frameCallbacks++;
+    result.frameMetadata = {
+      mediaTime: metadata.mediaTime, presentedFrames: metadata.presentedFrames,
+      width: metadata.width, height: metadata.height
+    };
+    callbackId = ui.video.requestVideoFrameCallback(collectFrame);
+  };
+  for (const name of ["loadedmetadata", "loadeddata", "playing", "waiting", "stalled", "error"]) {
+    addEvent(ui.video, name, () => {
+      if (result.events.length < 60) result.events.push({ name, time: ui.video.currentTime, readyState: ui.video.readyState });
+    });
+  }
+  for (const canvas of [plainCanvas, chromaCanvas]) {
+    addEvent(canvas, "webglcontextlost", () => addUnique(result.errors, "WebGL上下文丢失"));
+  }
   ui.status.textContent = "检测中";
+  ui.section.scrollIntoView({ block: "start" });
   try {
-    await ui.video.play();
-    plain = createRenderer(plainCanvas, false);
-    chroma = createRenderer(chromaCanvas, true);
-    const context2d = canvas2d.getContext("2d", { willReadFrequently: true });
-    const startedAt = performance.now();
-    let lastPlainError = 0;
-    let lastChromaError = 0;
-    while (performance.now() - startedAt < 6500) {
-      if (ui.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && ui.video.videoWidth > 0) {
-        context2d.drawImage(ui.video, 0, 0, canvas2d.width, canvas2d.height);
-        lastPlainError = plain.draw(ui.video);
-        lastChromaError = chroma.draw(ui.video);
+    // Failures in one path must not prevent measurement of the others.
+    try { plain = createRenderer(plainCanvas, false); } catch (error) { addUnique(result.errors, "WebGL: " + error); }
+    try { chroma = createRenderer(chromaCanvas, true); } catch (error) { addUnique(result.errors, "抠绿: " + error); }
+    let source;
+    if (test.kind === "static") {
+      source = makeControlImage();
+      await withTimeout(source.decode(), 5000, "静态对照图解码超时");
+      ui.video.replaceWith(source);
+      source.style.cssText = "width:100%;aspect-ratio:3/4";
+    } else {
+      if (ui.video.requestVideoFrameCallback) callbackId = ui.video.requestVideoFrameCallback(collectFrame);
+      ui.video.src = test.url;
+      try {
+        await withTimeout(ui.video.play(), 8000, "播放请求超时");
+      } catch (error) {
+        addUnique(result.errors, "播放: " + error);
       }
-      await new Promise(resolve => requestAnimationFrame(resolve));
+      source = ui.video;
+    }
+    const started = performance.now();
+    const duration = test.kind === "static" ? 1000 : 6000;
+    let previousTime = ui.video.currentTime;
+    while (performance.now() - started < duration) {
+      if (document.hidden) result.readWhileHidden = true;
+      const time = ui.video.currentTime;
+      if (Math.abs(time - previousTime) > 0.001) result.timeAdvanced = true;
+      previousTime = time;
+      if (test.kind === "static" || (ui.video.readyState >= 2 && ui.video.videoWidth > 0)) {
+        const sample = { at: Math.round(performance.now() - started), mediaTime: time, callbacks: result.frameCallbacks };
+        try {
+          context2d.clearRect(0, 0, 180, 240);
+          context2d.drawImage(source, 0, 0, 180, 240);
+          sample.canvas2d = pixelStats(canvas2d);
+        } catch (error) { addUnique(result.errors, "Canvas: " + error); }
+        for (const [key, renderer, canvas] of [["webgl", plain, plainCanvas], ["chroma", chroma, chromaCanvas]]) {
+          if (!renderer) continue;
+          try {
+            const uploadError = renderer.draw(source);
+            if (uploadError) addUnique(result.glErrors, key + ":上传绘制=" + uploadError);
+            const stats = pixelStats(canvas, renderer.gl);
+            const readError = renderer.gl.getError();
+            if (readError) addUnique(result.glErrors, key + ":读取=" + readError);
+            if (!uploadError && !readError && !renderer.gl.isContextLost()) sample[key] = stats;
+          } catch (error) { addUnique(result.errors, key + ": " + error); }
+        }
+        result.samples.push(sample);
+      }
+      await sleep(250);
     }
     result.video = {
-      readyState: ui.video.readyState,
-      networkState: ui.video.networkState,
-      dimensions: `${ui.video.videoWidth}x${ui.video.videoHeight}`,
-      currentTime: +ui.video.currentTime.toFixed(3),
-      paused: ui.video.paused,
-      ended: ui.video.ended,
+      readyState: ui.video.readyState, networkState: ui.video.networkState,
+      width: ui.video.videoWidth, height: ui.video.videoHeight,
+      currentTime: ui.video.currentTime, paused: ui.video.paused,
       error: ui.video.error ? { code: ui.video.error.code, message: ui.video.error.message } : null
     };
-    result.canvas2d = pixelStats(canvas2d);
-    result.webgl = { ...pixelStats(plainCanvas, plain.gl), glError: lastPlainError };
-    result.chroma = { ...pixelStats(chromaCanvas, chroma.gl), glError: lastChromaError };
-    const failed = result.video.currentTime === 0 || result.canvas2d.blackPercent > 95 || result.webgl.blackPercent > 95;
-    ui.status.textContent = failed ? "发现异常" : "完成";
-    ui.status.className = `status ${failed ? "bad" : "ok"}`;
+    ui.status.textContent = "已采样";
   } catch (error) {
-    result.failure = String(error?.stack || error);
-    result.video = { readyState: ui.video.readyState, networkState: ui.video.networkState, error: ui.video.error?.message || null };
-    ui.status.textContent = "失败";
-    ui.status.className = "status bad";
+    result.failure = String(error);
+    ui.status.textContent = "未完成";
+  } finally {
+    stopped = true;
+    if (callbackId !== undefined) ui.video.cancelVideoFrameCallback(callbackId);
+    listeners.forEach(remove => remove());
+    // Keep visible snapshots, but release decoders and GPU resources between cases.
+    for (const canvas of [plainCanvas, chromaCanvas]) {
+      try {
+        const snapshot = new Image();
+        snapshot.src = canvas.toDataURL();
+        snapshot.style.cssText = "width:100%;aspect-ratio:3/4;background:repeating-conic-gradient(#555 0% 25%,#333 0% 50%) 0/16px 16px";
+        canvas.replaceWith(snapshot);
+      } catch { /* Numeric read failures are recorded above. */ }
+    }
+    if (test.kind !== "static" && !test.detached) {
+      const note = document.createElement("p");
+      note.textContent = "本组已停止并释放视频。上方时间变化／帧回调不等同于肉眼确认原生画面，请留意测试期间的视频。";
+      ui.video.replaceWith(note);
+    }
+    ui.video.pause();
+    ui.video.removeAttribute("src");
+    ui.video.load();
+    plain?.dispose();
+    chroma?.dispose();
+    ui.log.textContent = JSON.stringify(result, null, 2);
+    report.cases.push(result);
+    renderSummary();
   }
-  ui.log.textContent = JSON.stringify(result, null, 2);
-  report.cases.push(result);
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (startButton.disabled && document.hidden) report.hiddenCount++;
+});
 
 startButton.addEventListener("click", async () => {
   startButton.disabled = true;
+  copyButton.disabled = true;
+  const sourceInput = document.querySelector("#source");
+  sourceInput.disabled = true;
   casesHost.replaceChildren();
   report.cases = [];
+  report.createdAt = new Date().toISOString();
+  report.hiddenCount = 0;
   summary.classList.remove("visible");
-  for (const test of TESTS) await runCase(test);
-  renderSummary();
-  copyButton.disabled = false;
-  startButton.textContent = "重新检测";
-  startButton.disabled = false;
+  let localUrl;
+  try {
+    await withTimeout(collectEnvironment(), 5000, "设备信息读取超时").catch(error => { device.textContent = String(error); });
+    const tests = [{ id: "static", label: "A · 静态图片对照", kind: "static", url: "" }];
+    for (const test of TESTS) {
+      tests.push({ ...test, id: test.id + "-inline", label: test.label + " · 页面内无控件" });
+      tests.push({ ...test, id: test.id + "-detached", label: test.label + " · 离屏" , detached: true });
+    }
+    tests.push({ ...TESTS[0], id: "high-controls", label: "High · 页面内带控件（旧版对照）", controls: true });
+    if (sourceInput.files[0]) {
+      localUrl = URL.createObjectURL(sourceInput.files[0]);
+      tests.push({ id: "local-inline", label: "本机 NPC · 页面内", url: localUrl, local: true });
+      tests.push({ id: "local-detached", label: "本机 NPC · 离屏", url: localUrl, local: true, detached: true });
+    }
+    for (let index = 0; index < tests.length; index++) {
+      startButton.textContent = "检测 " + (index + 1) + "/" + tests.length;
+      await runCase(tests[index]);
+    }
+  } catch (error) {
+    device.textContent += "\n检测中断: " + error;
+  } finally {
+    if (localUrl) URL.revokeObjectURL(localUrl);
+    report.finishedAt = new Date().toISOString();
+    renderSummary();
+    summary.scrollIntoView({ behavior: "smooth", block: "start" });
+    copyButton.disabled = false;
+    startButton.textContent = "重新检测";
+    startButton.disabled = false;
+    sourceInput.disabled = false;
+  }
 });
 
 copyButton.addEventListener("click", async () => {
-  report.finishedAt = new Date().toISOString();
-  await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
-  copyButton.textContent = "已复制";
-  setTimeout(() => { copyButton.textContent = "复制诊断结果"; }, 1500);
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
+    copyButton.textContent = "已复制";
+  } catch {
+    copyButton.textContent = "无法复制，请截图";
+  }
+  setTimeout(() => { copyButton.textContent = "复制诊断结果"; }, 2000);
 });
 
-collectEnvironment();
+collectEnvironment().catch(error => { device.textContent = String(error); });

@@ -3,7 +3,7 @@ const TESTS = [
   { id: "main", label: "兼容 H.264 Main", url: "./idle-main.mp4", codec: 'video/mp4; codecs="avc1.4d4020"' }
 ];
 
-const report = { version: "2026-09-18.2", createdAt: new Date().toISOString(), environment: {}, cases: [] };
+const report = { version: "2026-09-18.3", createdAt: new Date().toISOString(), environment: {}, cases: [] };
 const device = document.querySelector("#device");
 const casesHost = document.querySelector("#cases");
 const startButton = document.querySelector("#start");
@@ -186,7 +186,7 @@ function aggregate(samples, key) {
 function renderSummary() {
   summary.replaceChildren();
   const title = document.createElement("h2");
-  title.textContent = "V2 检测结果（可分段截图）";
+  title.textContent = "V3 检测结果（可分段截图）";
   summary.append(title);
   const env = document.createElement("pre");
   env.textContent = "版本: " + report.version + "\n浏览器: " + report.environment.userAgent +
@@ -205,6 +205,7 @@ function renderSummary() {
       "抠绿: " + aggregate(item.samples, "chroma") + "\n" +
       "GL错误: " + (item.glErrors.join(",") || "无") + "\n" +
       "读取异常: " + (item.errors.join("；") || "无") +
+      (item.path === "seek" ? "\n已完成跳帧: " + item.seeks + "（不代表连续播放）" : "") +
       (item.failure ? "\n未完成: " + item.failure : "") +
       (item.readWhileHidden ? "\n注意: 存在后台采样，本组需前台重测" : "");
     summary.append(block);
@@ -229,6 +230,22 @@ function addUnique(list, value) {
   if (value && !list.includes(value)) list.push(value);
 }
 
+function waitEvent(target, name, action, timeout) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      target.removeEventListener(name, done);
+      target.removeEventListener("error", fail);
+    };
+    const done = () => { cleanup(); resolve(); };
+    const fail = () => { cleanup(); reject(new Error(name + " 媒体事件异常")); };
+    const timer = setTimeout(() => { cleanup(); reject(new Error(name + " 等待超时")); }, timeout);
+    target.addEventListener(name, done);
+    target.addEventListener("error", fail);
+    try { action(); } catch (error) { cleanup(); reject(error); }
+  });
+}
+
 function makeControlImage() {
   const canvas = document.createElement("canvas");
   canvas.width = 180;
@@ -249,7 +266,7 @@ async function runCase(test) {
   const result = {
     id: test.id, label: test.label, kind: test.kind || "video",
     source: test.local ? "用户选择的本机视频" : test.url,
-    mode: test.detached ? "detached" : "inline",
+    mode: test.detached ? "detached" : "inline", path: test.path || "direct", seeks: 0,
     samples: [], events: [], errors: [], glErrors: [],
     frameCallbacks: 0, frameMetadata: null, timeAdvanced: false, readWhileHidden: false
   };
@@ -257,6 +274,7 @@ async function runCase(test) {
   let chroma;
   let callbackId;
   let stopped = false;
+  let objectUrl;
   const listeners = [];
   const canvas2d = ui.section.querySelector(".canvas2d");
   const plainCanvas = ui.section.querySelector(".webgl");
@@ -297,18 +315,52 @@ async function runCase(test) {
       source.style.cssText = "width:100%;aspect-ratio:3/4";
     } else {
       if (ui.video.requestVideoFrameCallback) callbackId = ui.video.requestVideoFrameCallback(collectFrame);
-      ui.video.src = test.url;
+      if (test.path === "blob" || test.path === "mse") {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 12000);
+        let bytes;
+        try {
+          const response = await fetch(test.url, { signal: controller.signal });
+          if (!response.ok) throw new Error("素材请求 HTTP " + response.status);
+          bytes = await response.arrayBuffer();
+        } finally { clearTimeout(timer); }
+        if (test.path === "blob") {
+          objectUrl = URL.createObjectURL(new Blob([bytes], { type: "video/mp4" }));
+          ui.video.src = objectUrl;
+        } else {
+          if (!window.MediaSource || !MediaSource.isTypeSupported(TESTS[0].codec)) throw new Error("本浏览器不支持该 MSE 类型");
+          const media = new MediaSource();
+          objectUrl = URL.createObjectURL(media);
+          await waitEvent(media, "sourceopen", () => { ui.video.src = objectUrl; }, 8000);
+          const buffer = media.addSourceBuffer(TESTS[0].codec);
+          await waitEvent(buffer, "updateend", () => buffer.appendBuffer(bytes), 8000);
+          media.endOfStream();
+        }
+      } else {
+        ui.video.src = test.url;
+      }
       try {
         await withTimeout(ui.video.play(), 8000, "播放请求超时");
       } catch (error) {
         addUnique(result.errors, "播放: " + error);
       }
       source = ui.video;
+      if (test.path === "seek") {
+        ui.video.pause();
+        if (ui.video.readyState < 1) await waitEvent(ui.video, "loadedmetadata", () => {}, 5000);
+      }
     }
     const started = performance.now();
     const duration = test.kind === "static" ? 1000 : 6000;
     let previousTime = ui.video.currentTime;
     while (performance.now() - started < duration) {
+      if (test.path === "seek") {
+        try {
+          const target = 0.25 + (result.seeks % 8) * 0.4;
+          await waitEvent(ui.video, "seeked", () => { ui.video.currentTime = target; }, 3000);
+          result.seeks++;
+        } catch (error) { addUnique(result.errors, "跳帧: " + error); break; }
+      }
       if (document.hidden) result.readWhileHidden = true;
       const time = ui.video.currentTime;
       if (Math.abs(time - previousTime) > 0.001) result.timeAdvanced = true;
@@ -366,6 +418,7 @@ async function runCase(test) {
     ui.video.pause();
     ui.video.removeAttribute("src");
     ui.video.load();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
     plain?.dispose();
     chroma?.dispose();
     ui.log.textContent = JSON.stringify(result, null, 2);
@@ -392,11 +445,11 @@ startButton.addEventListener("click", async () => {
   try {
     await withTimeout(collectEnvironment(), 5000, "设备信息读取超时").catch(error => { device.textContent = String(error); });
     const tests = [{ id: "static", label: "A · 静态图片对照", kind: "static", url: "" }];
-    for (const test of TESTS) {
-      tests.push({ ...test, id: test.id + "-inline", label: test.label + " · 页面内无控件" });
-      tests.push({ ...test, id: test.id + "-detached", label: test.label + " · 离屏" , detached: true });
-    }
-    tests.push({ ...TESTS[0], id: "high-controls", label: "High · 页面内带控件（旧版对照）", controls: true });
+    tests.push({ ...TESTS[0], id: "direct", label: "B · 原始 MP4 地址（基线）" });
+    tests.push({ ...TESTS[0], id: "blob", label: "C · 下载后 Blob 播放", path: "blob" });
+    tests.push({ ...TESTS[0], url: "./idle-fragmented.mp4", id: "fragment-direct", label: "D · 分片 MP4 直接播放" });
+    tests.push({ ...TESTS[0], url: "./idle-fragmented.mp4", id: "mse", label: "E · MSE 分片媒体播放", path: "mse" });
+    tests.push({ ...TESTS[0], id: "seek", label: "F · 暂停后逐次跳帧读取", path: "seek" });
     if (sourceInput.files[0]) {
       localUrl = URL.createObjectURL(sourceInput.files[0]);
       tests.push({ id: "local-inline", label: "本机 NPC · 页面内", url: localUrl, local: true });

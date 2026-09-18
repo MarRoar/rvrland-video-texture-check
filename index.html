@@ -40,8 +40,9 @@
   </head>
   <body>
     <main>
-      <h1>小米视频纹理诊断 · V2</h1>
-      <p class="note">版本 2026-09-18.2。请保持页面前台，点击开始后等待约 35–70 秒。页面会自动滚动到当前测试，请勿切换应用。完成后截取设备信息和各组结果，无需复制。</p>
+      <h1>小米视频纹理诊断 · V3</h1>
+      <p class="note">版本 2026-09-18.3。请保持页面前台，点击开始后等待约 40–100 秒。页面会自动滚动到当前测试，请勿切换应用。完成后截取设备信息和 A–F 六组结果，无需复制。</p>
+      <p class="note">本轮对比：静态图片、原始 MP4、下载后 Blob、分片 MP4、MSE 分片媒体、暂停跳帧。F 组是静止帧读取实验，即使成功也不代表连续动画已修复。</p>
       <p class="note">默认素材仍是游客视频，不代表已测试所有 NPC。可选：选择一段实际出问题的 NPC 视频，增加页面内／离屏对照；文件只在本机读取，不会上传。</p>
       <input id="source" type="file" accept="video/*" aria-label="可选的 NPC 视频" />
       <div class="actions">
@@ -52,6 +53,6 @@
       <section id="device" class="device">正在读取设备信息…</section>
       <div id="cases"></div>
     </main>
-    <script src="./diagnostics.js?v=20260918-2"></script>
+    <script src="./diagnostics.js?v=20260918-3"></script>
   </body>
 </html>

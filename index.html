@@ -17,6 +17,10 @@
       button:disabled { opacity: .55; }
       .actions { position: sticky; top: 0; z-index: 5; display: flex; gap: 10px; padding: 10px 0; background: rgb(20 22 24 / 94%); }
       .device, .case { margin: 12px 0; border: 1px solid #4e4b42; border-radius: 12px; padding: 12px; background: #202326; }
+      .summary { display: none; margin: 12px 0; border: 2px solid #d8b36a; border-radius: 12px; padding: 12px; background: #25231e; }
+      .summary.visible { display: block; }
+      .summary h2 { margin-bottom: 8px; color: #f1cf87; }
+      .summary pre { max-height: none; margin: 0; background: #111; color: #fff; font-size: 13px; }
       .device { font: 12px/1.5 ui-monospace, Consolas, monospace; overflow-wrap: anywhere; white-space: pre-wrap; }
       .case header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
       .status { flex: none; border-radius: 999px; padding: 3px 8px; background: #5e5542; font-size: 12px; }
@@ -38,6 +42,7 @@
         <button id="start" type="button">开始检测</button>
         <button id="copy" type="button" disabled>复制诊断结果</button>
       </div>
+      <section id="summary" class="summary"><h2>结果汇总（请截图）</h2><pre></pre></section>
       <section id="device" class="device">正在读取设备信息…</section>
       <div id="cases"></div>
     </main>

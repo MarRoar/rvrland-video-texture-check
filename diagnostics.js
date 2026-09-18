@@ -8,6 +8,7 @@ const device = document.querySelector("#device");
 const casesHost = document.querySelector("#cases");
 const startButton = document.querySelector("#start");
 const copyButton = document.querySelector("#copy");
+const summary = document.querySelector("#summary");
 
 function createGl(canvas) {
   return canvas.getContext("webgl", { alpha: true, antialias: false, preserveDrawingBuffer: true });
@@ -143,6 +144,25 @@ function pixelStats(canvas, gl) {
   return { blackPercent: +(black / count * 100).toFixed(1), transparentPercent: +(transparent / count * 100).toFixed(1) };
 }
 
+function renderSummary() {
+  const shortUa = report.environment.userAgent || "未知";
+  const lines = [
+    `浏览器: ${shortUa}`,
+    `GPU: ${report.environment.webgl?.renderer || "未知"}`,
+    "",
+    ...report.cases.map(item => {
+      const video = item.video?.currentTime > 0 ? "播放" : "失败";
+      const canvas = item.canvas2d?.blackPercent > 95 ? "黑屏" : item.canvas2d ? "正常" : "失败";
+      const webgl = item.webgl?.blackPercent > 95 ? "黑屏" : item.webgl ? "正常" : "失败";
+      const shader = item.chroma?.blackPercent > 95 ? "黑屏" : item.chroma ? "正常" : "失败";
+      return `${item.id.toUpperCase()}: VIDEO=${video}  CANVAS=${canvas}\n       WEBGL=${webgl}  SHADER=${shader}\n       GL=${item.webgl?.glError ?? "-"}/${item.chroma?.glError ?? "-"}`;
+    })
+  ];
+  summary.querySelector("pre").textContent = lines.join("\n");
+  summary.classList.add("visible");
+  summary.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 async function runCase(test) {
   const ui = makeCase(test);
   const events = [];
@@ -201,7 +221,9 @@ startButton.addEventListener("click", async () => {
   startButton.disabled = true;
   casesHost.replaceChildren();
   report.cases = [];
+  summary.classList.remove("visible");
   for (const test of TESTS) await runCase(test);
+  renderSummary();
   copyButton.disabled = false;
   startButton.textContent = "重新检测";
   startButton.disabled = false;
